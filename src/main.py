@@ -4,16 +4,16 @@ from mathutils import gaussian
 #from config import MU_1, SIGMA_1, MU_2, SIGMA_2, N_POINTS
 #from scipy.optimize import newton
 
-N_POINTS = 500
+N_POINTS = 1000
 
 ## distribution initiale
 MU_1 = 4
-SIGMA_1 = 0.68
+SIGMA_1 = .7
 MU_2 = 12
-SIGMA_2 = 0.68
+SIGMA_2 = .7
 L_INTERVALLE =16
 
-EPS = 10
+EPS = 0.5
 def newton(f, x0, jacobian, eps, args=()):
     x=x0
     f_value = f(x, *args)
@@ -32,10 +32,9 @@ def newton(f, x0, jacobian, eps, args=()):
         print("Newton failed to converge")
     return x#, n_iter
 
-
 class ConvexProximalMethod():
 
-    def __init__(self, mu, costs, phi, eps, h_G3, hprime_G3, E):
+    def __init__(self, mu, costs, phi, eps, h_G3, hprim_G3, E):
         self.mu = mu.reshape(-1, 1)
         self.costs = costs
         self.phi = phi
@@ -45,13 +44,13 @@ class ConvexProximalMethod():
         self.E = E
 
     def prox_G1_KL(self, theta):
-        return theta * self.mu * (1 / np.sum(theta, axis=1)).reshape(-1, 1)#(self.mu.T @ theta).reshape(-1, 1) / np.sum(theta, axis=1).reshape(-1, 1) #TODO: vérifier dimension
+        sum_theta = np.sum(theta, axis=1)
+        return theta * self.mu * np.nan_to_num(1 / sum_theta).reshape(-1, 1)#(self.mu.T @ theta).reshape(-1, 1) / np.sum(theta, axis=1).reshape(-1, 1) #TODO: vérifier dimension
 
     #prox 2
     def f_G2(self, nu, theta):
         # nu vecteur vertical
-        shape = nu.shape
-        return nu - np.sum(theta, axis=0).reshape(nu.shape) * np.exp( - (nu + self.phi.T @ nu) / self.eps) #TODO : ne marche que pour mu vertical
+        return nu - np.sum(theta, axis=0).reshape(nu.shape) * np.exp( - (nu + self.phi.T @ nu) / self.eps)
 
     def jacobian_f_G2(self, nu, theta):
         #nu est vertical
@@ -68,12 +67,12 @@ class ConvexProximalMethod():
         return nu - np.sum(theta, axis=0).reshape(nu.shape) * np.exp(- self.h_G3(nu) / self.eps)
 
     def jacobian_f_G3(self, nu, theta):
-        A = np.sum(theta, axis=0).reshape(nu.shape) * np.exp(- h_G3(nu) / self.eps)
+        A = np.sum(theta, axis=0).reshape(nu.shape) * np.exp(- self.h_G3(nu) / self.eps)
         return np.eye(nu.size) + self.hprim_G3(mu) * np.tile(A, (1, nu.size))
 
     def prox_G3_KL(self, theta):
         #TODO: newton pour calculer nu
-        nu = newton(self.f_G3, np.zeros((theta.shape[1], 1)), self.jacobian_f_G3(x), self.eps, args=(theta,))
+        nu = newton(self.f_G3, np.zeros((theta.shape[1], 1)), self.jacobian_f_G3, self.eps, args=(theta,))
         return theta * np.exp(- self.h_G3(nu) / self.eps)
 
     #Prox cyclique
@@ -95,18 +94,86 @@ class ConvexProximalMethod():
         gap = np.inf
         n = 1
         # print("gamma", np.linalg.norm(gamma))
-        while gap > self.eps:
+        while gap > self.eps or n%L != 1: # todo : trouver une condition sur le gap qui ne soit pas dépendante du nombre de points
             print(n)
             new_gamma = self.prox_Gn_KL(n, gamma * z[n % L])
             z[n % L] = z[(n-1) % L] * (gamma / new_gamma)
             print("new_gamma : ", np.linalg.norm(new_gamma, ord=1), new_gamma.shape)
             print("gamma : ", np.linalg.norm(gamma, ord=1), new_gamma.shape)
-            gap = np.linalg.norm(gamma - new_gamma, ord=1)
+            gap = np.linalg.norm(gamma - new_gamma, ord=np.inf)
             print("gap : ", gap)
             gamma = new_gamma
             n += 1
         
         return gamma, np.sum(gamma, axis=0)
+
+class SemiImplicitMethod():
+
+    def __init__(self, mu, costs, phi, eps, h_G2, hprim_G2, E):
+        self.mu = mu.reshape(-1, 1)
+        self.costs = costs
+        self.phi = phi
+        self.eps = eps
+        self.E = E
+        self.h_G2 = h_G2
+        self.hprim_G2 = hprim_G2
+
+    def prox_G1_KL(self, theta):
+        sum_theta = np.sum(theta, axis=1)
+        return theta * self.mu * np.nan_to_num(1 / sum_theta).reshape(-1, 1)
+
+    def f_G2(self, nu, theta):
+        return nu - np.sum(theta, axis=0).reshape(nu.shape) * np.exp(- self.h_G2(nu) / self.eps)
+
+    def jacobian_f_G2(self, nu, theta):
+        A = np.sum(theta, axis=0).reshape(nu.shape) * np.exp(- self.h_G2(nu) / self.eps)
+        return np.eye(nu.size) + self.hprim_G2(mu) * np.tile(A, (1, nu.size))
+
+    def prox_G2_KL(self, theta):
+        nu = newton(self.f_G2, np.zeros((theta.shape[1], 1)), self.jacobian_f_G2, self.eps, args=(theta,))
+        return theta * np.exp(- self.h_G2(nu) / self.eps)
+
+    def prox_Gn_KL(self, n, theta):
+        if n % 3 == 1:
+            return self.prox_G1_KL(theta)
+
+        elif n % 3 == 2:
+            return self.prox_G2_KL(theta)
+
+    def promimal_step(self, costs):
+        L = 2
+        gamma = np.exp(-costs / self.eps) # TODO: revoir point de départ
+        z = [np.ones((self.mu.size, self.costs.shape[1])) for _ in range(L)]
+        gap = np.inf
+        n = 1
+        while gap > self.eps or n%L != 1: # todo : trouver une condition sur le gap qui ne soit pas dépendante du nombre de points
+            print(n)
+            new_gamma = self.prox_Gn_KL(n, gamma * z[n % L])
+            z[n % L] = z[(n-1) % L] * (gamma / new_gamma)
+            # print("new_gamma : ", np.linalg.norm(new_gamma, ord=1), new_gamma.shape)
+            # print("gamma : ", np.linalg.norm(gamma, ord=1), new_gamma.shape)
+            gap = np.linalg.norm(gamma - new_gamma, ord=np.inf)
+            # print("gap : ", gap)
+            gamma = new_gamma
+            n += 1
+        
+        return gamma, np.sum(gamma, axis=0)
+
+    def fit(self):
+        nu = np.ones((self.costs.shape[1], 1))
+        nu = nu / np.sum(nu)
+        gap = np.inf
+        n_iter = 1
+        while gap > self.eps:
+            print(n_iter)
+            new_costs = self.costs + np.tile(nu.T @ self.phi, (self.costs.shape[0], 1))
+            gamma, new_nu = self.promimal_step(new_costs)
+            gap = np.linalg.norm(new_nu - nu, ord=np.inf)
+            nu = new_nu
+            print("gap", gap)
+            n_iter += 1
+        return gamma, nu
+
 
 if __name__ == "__main__":
     x = np.linspace(0, L_INTERVALLE, N_POINTS)
@@ -122,15 +189,24 @@ if __name__ == "__main__":
     def E(nu, phi, potential):
         return np.sum(nu ** 8 + 0.5 * nu.T @ phi @ nu + potential)
 
-    def h_G3(nu): # fonction issue du potentiel
-        return 8 * (nu ** 7) - nu
+    # def h_G3(nu): # fonction issue du potentiel
+    #     return 8 * (nu ** 7) - nu
 
-    def hprim_G3(nu):
-        return 56 * (nu ** 6) - 1
+    # def hprim_G3(nu):
+    #     return 56 * (nu ** 6) - 1
 
+    # method = ConvexProximalMethod(mu, costs, phi, EPS, h_G3, hprim_G3, E)
+    # gamma, nu = method.fit()
 
-    method = ConvexProximalMethod(mu, costs, phi, EPS, h_G3, hprim_G3, E)
+    def h_G2(nu): # fonction issue du potentiel
+        return 8 * (nu ** 7)
+    
+    def hprim_G2(nu):
+        return 56 * (nu ** 6)
+
+    method = SemiImplicitMethod(mu, costs, phi, EPS, h_G2, hprim_G2, E)
     gamma, nu = method.fit()
+
 
     #print("somme gamma", np.sum(gamma))
     print("somme mu", np.sum(mu))
@@ -139,13 +215,14 @@ if __name__ == "__main__":
     fig = plt.figure(f"Solution finale", figsize=(15, 10))
     ax1 = fig.add_subplot(111)
     ax1.plot(x, mu * N_POINTS / L_INTERVALLE, label="mu")
-    ax1.plot(x, nu * N_POINTS / L_INTERVALLE, label="gamma")
+    ax1.plot(x, nu * N_POINTS / L_INTERVALLE, label="nu")
     ax1.grid(True)
     ax1.set_xlabel("x")
     ax1.set_ylabel("density")
     ax1.set_title("Illustration de la valeur de nu en fonction de celle de mu")
     ax1.legend()
     plt.show()
+
 
     # plt.imshow(costs)
     # plt.colorbar()
