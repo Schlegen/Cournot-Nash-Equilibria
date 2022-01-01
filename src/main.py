@@ -1,10 +1,11 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from mathutils import gaussian
+import argparse
 #from config import MU_1, SIGMA_1, MU_2, SIGMA_2, N_POINTS
 #from scipy.optimize import newton
 
-N_POINTS = 1000
+N_POINTS = 200
 
 ## distribution initiale
 MU_1 = 4
@@ -12,8 +13,9 @@ SIGMA_1 = .7
 MU_2 = 12
 SIGMA_2 = .7
 L_INTERVALLE =16
-
 EPS = 0.5
+
+
 def newton(f, x0, jacobian, eps, args=()):
     x=x0
     f_value = f(x, *args)
@@ -45,7 +47,11 @@ class ConvexProximalMethod():
 
     def prox_G1_KL(self, theta):
         sum_theta = np.sum(theta, axis=1)
-        return theta * self.mu * np.nan_to_num(1 / sum_theta).reshape(-1, 1)#(self.mu.T @ theta).reshape(-1, 1) / np.sum(theta, axis=1).reshape(-1, 1) #TODO: vérifier dimension
+        return theta * self.mu * np.nan_to_num(1 / sum_theta).reshape(-1, 1) #(self.mu.T @ theta).reshape(-1, 1) / np.sum(theta, axis=1).reshape(-1, 1) #TODO: vérifier dimension
+
+    def log_prox_G1_KL(self, theta):
+        sum_theta = np.sum(theta, axis=1)
+        return np.log(theta) + np.log(self.mu) - np.nan_to_num(np.log(sum_theta).reshape(-1, 1)) #(self.mu.T @ theta).reshape(-1, 1) / np.sum(theta, axis=1).reshape(-1, 1) #TODO: vérifier dimension
 
     #prox 2
     def f_G2(self, nu, theta):
@@ -58,9 +64,14 @@ class ConvexProximalMethod():
         return np.eye(nu.size) + ((np.eye(nu.size) + self.phi) / self.eps) * np.tile(A, (1, nu.size))
 
     def prox_G2_KL(self, theta):  
-        assert np.sum(phi ** 2) < 1 #TODO remplacer par un erreur
+        assert np.sum(phi ** 2) < 1 #TODO remplacer par une erreur
         nu = newton(self.f_G2, np.zeros((theta.shape[1], 1)), self.jacobian_f_G2, self.eps, args=(theta,))
-        return theta * (np.exp(-(nu + nu.T @ self.phi) / self.eps))
+        return theta * np.exp(-(nu + nu.T @ self.phi) / self.eps)
+
+    def log_prox_G2_KL(self, theta):  
+        assert np.sum(phi ** 2) < 1 #TODO remplacer par une erreur
+        nu = newton(self.f_G2, np.zeros((theta.shape[1], 1)), self.jacobian_f_G2, self.eps, args=(theta,))
+        return np.log(theta) - (nu + nu.T @ self.phi) / self.eps
 
     #prox 3
     def f_G3(self, nu, theta):
@@ -71,9 +82,12 @@ class ConvexProximalMethod():
         return np.eye(nu.size) + self.hprim_G3(mu) * np.tile(A, (1, nu.size))
 
     def prox_G3_KL(self, theta):
-        #TODO: newton pour calculer nu
         nu = newton(self.f_G3, np.zeros((theta.shape[1], 1)), self.jacobian_f_G3, self.eps, args=(theta,))
         return theta * np.exp(- self.h_G3(nu) / self.eps)
+
+    def log_prox_G3_KL(self, theta):
+        nu = newton(self.f_G3, np.zeros((theta.shape[1], 1)), self.jacobian_f_G3, self.eps, args=(theta,))
+        return np.log(theta) - self.h_G3(nu) / self.eps
 
     #Prox cyclique
     def prox_Gn_KL(self, n, theta):
@@ -86,6 +100,17 @@ class ConvexProximalMethod():
         elif n % 3 == 0:
             return self.prox_G3_KL(theta)
 
+    def log_prox_Gn_KL(self, n, theta):
+        if n % 3 == 1:
+            return self.log_prox_G1_KL(theta)
+
+        elif n % 3 == 2:
+            return self.log_prox_G2_KL(theta)
+
+        elif n % 3 == 0:
+            return self.log_prox_G3_KL(theta)
+
+
     #PROXIMAL ALGO
     def fit(self):
         L = 3
@@ -95,9 +120,51 @@ class ConvexProximalMethod():
         n = 1
         # print("gamma", np.linalg.norm(gamma))
         while gap > self.eps or n%L != 1: # todo : trouver une condition sur le gap qui ne soit pas dépendante du nombre de points
-            print(n)
+            #print(n)
             new_gamma = self.prox_Gn_KL(n, gamma * z[n % L])
             z[n % L] = z[(n-1) % L] * (gamma / new_gamma)
+            print("new_gamma : ", np.linalg.norm(new_gamma, ord=1), new_gamma.shape)
+            print("gamma : ", np.linalg.norm(gamma, ord=1), new_gamma.shape)
+            gap = np.linalg.norm(gamma - new_gamma, ord=np.inf)
+            print("gap : ", gap)
+            gamma = new_gamma
+            n += 1
+        
+        return gamma, np.sum(gamma, axis=0)
+
+    def fit_log(self):
+        L = 3
+        log_gamma = -self.costs / self.eps
+        z = [np.ones((self.mu.size, self.costs.shape[1])) for _ in range(L)]
+        gap = np.inf
+        n = 1
+        # print("gamma", np.linalg.norm(gamma))
+        while gap > self.eps or n%L != 1: # todo : trouver une condition sur le gap qui ne soit pas dépendante du nombre de points
+            #print(n)
+            log_new_gamma = self.log_prox_Gn_KL(n, log_gamma * z[n % L])
+            z[n % L] = z[(n-1) % L] * np.exp(log_gamma - log_new_gamma)
+            print("new_gamma : ", np.linalg.norm(log_new_gamma, ord=1), log_new_gamma.shape)
+            print("gamma : ", np.linalg.norm(log_gamma, ord=1), log_new_gamma.shape)
+            gap = np.linalg.norm(np.exp(log_gamma) - np.exp(log_new_gamma), ord=np.inf)
+            print("gap : ", gap)
+            log_gamma = log_new_gamma
+            n += 1
+        
+        gamma = np.exp(log_gamma)
+
+        return gamma, np.sum(gamma, axis=0)
+
+    def fit_log2(self):
+        L = 3
+        gamma = np.exp(-self.costs / self.eps)
+        z = [np.ones((self.mu.size, self.costs.shape[1])) for _ in range(L)]
+        gap = np.inf
+        n = 1
+        # print("gamma", np.linalg.norm(gamma))
+        while gap > self.eps or n%L != 1: # todo : trouver une condition sur le gap qui ne soit pas dépendante du nombre de points
+            #print(n)
+            new_gamma = self.prox_Gn_KL(n, gamma * z[n % L])
+            z[n % L] = z[(n-1) % L] * np.exp(np.log(gamma) -np.log(new_gamma))
             print("new_gamma : ", np.linalg.norm(new_gamma, ord=1), new_gamma.shape)
             print("gamma : ", np.linalg.norm(gamma, ord=1), new_gamma.shape)
             gap = np.linalg.norm(gamma - new_gamma, ord=np.inf)
@@ -165,7 +232,7 @@ class SemiImplicitMethod():
         gap = np.inf
         n_iter = 1
         while gap > self.eps:
-            print(n_iter)
+            #print(n_iter)
             new_costs = self.costs + np.tile(nu.T @ self.phi, (self.costs.shape[0], 1))
             gamma, new_nu = self.promimal_step(new_costs)
             gap = np.linalg.norm(new_nu - nu, ord=np.inf)
@@ -176,53 +243,107 @@ class SemiImplicitMethod():
 
 
 if __name__ == "__main__":
-    x = np.linspace(0, L_INTERVALLE, N_POINTS)
-    mu = gaussian(MU_1, SIGMA_1, x) + gaussian(MU_2, SIGMA_2, x)
-    mu = (mu / np.linalg.norm(mu, ord=1))
-
-    y = x # TODO: tester avec x et y de taille différente
-
-    phi = (10 ** -4) * (y.T - y) ** 2
-    potential = ((y-9) ** 4).reshape(1, -1)
-    costs = (x.reshape(-1, 1) - y.reshape(1, -1)) ** 2 + np.tile(potential, (x.size, 1))
-
-    def E(nu, phi, potential):
-        return np.sum(nu ** 8 + 0.5 * nu.T @ phi @ nu + potential)
-
-    # def h_G3(nu): # fonction issue du potentiel
-    #     return 8 * (nu ** 7) - nu
-
-    # def hprim_G3(nu):
-    #     return 56 * (nu ** 6) - 1
-
-    # method = ConvexProximalMethod(mu, costs, phi, EPS, h_G3, hprim_G3, E)
-    # gamma, nu = method.fit()
-
-    def h_G2(nu): # fonction issue du potentiel
-        return 8 * (nu ** 7)
-    
-    def hprim_G2(nu):
-        return 56 * (nu ** 6)
-
-    method = SemiImplicitMethod(mu, costs, phi, EPS, h_G2, hprim_G2, E)
-    gamma, nu = method.fit()
 
 
-    #print("somme gamma", np.sum(gamma))
-    print("somme mu", np.sum(mu))
-    print("somme nu", np.sum(nu))
-    
-    fig = plt.figure(f"Solution finale", figsize=(15, 10))
-    ax1 = fig.add_subplot(111)
-    ax1.plot(x, mu * N_POINTS / L_INTERVALLE, label="mu")
-    ax1.plot(x, nu * N_POINTS / L_INTERVALLE, label="nu")
-    ax1.grid(True)
-    ax1.set_xlabel("x")
-    ax1.set_ylabel("density")
-    ax1.set_title("Illustration de la valeur de nu en fonction de celle de mu")
-    ax1.legend()
-    plt.show()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-m", "--mode", help="mode of the execution",
+                        choices=["reprod", "holidays"], default="holidays")
+    args = parser.parse_args()
+    mode = args.mode
 
+    # Reproduction de l'algo de l'article
+    if mode == "reprod":
+        x = np.linspace(0, L_INTERVALLE, N_POINTS)
+        mu = gaussian(MU_1, SIGMA_1, x) + gaussian(MU_2, SIGMA_2, x)
+        mu = (mu / np.linalg.norm(mu, ord=1))
+
+        y = x # TODO: tester avec x et y de taille différente
+
+        phi = (10 ** -4) * (y.T - y) ** 2
+        potential = ((y-9) ** 4).reshape(1, -1)
+        costs = (x.reshape(-1, 1) - y.reshape(1, -1)) ** 2 + np.tile(potential, (x.size, 1))
+
+        def E(nu, phi, potential):
+            return np.sum(nu ** 8 + 0.5 * nu.T @ phi @ nu + potential)
+
+        def h_G3(nu): # fonction issue du potentiel
+            return 8 * (nu ** 7) - nu
+
+        def hprim_G3(nu):
+            return 56 * (nu ** 6) - 1
+
+        method = ConvexProximalMethod(mu, costs, phi, EPS, h_G3, hprim_G3, E)
+        gamma, nu = method.fit()
+
+        # def h_G2(nu): # fonction issue du potentiel
+        #     return 8 * (nu ** 7)
+        
+        # def hprim_G2(nu):
+        #     return 56 * (nu ** 6)
+
+        # method = SemiImplicitMethod(mu, costs, phi, EPS, h_G2, hprim_G2, E)
+        # gamma, nu = method.fit()
+
+
+        #print("somme gamma", np.sum(gamma))
+        print("somme mu", np.sum(mu))
+        print("somme nu", np.sum(nu))
+        
+        fig = plt.figure(f"Solution finale", figsize=(15, 10))
+        ax1 = fig.add_subplot(111)
+        ax1.plot(x, mu * N_POINTS / L_INTERVALLE, label="mu")
+        ax1.plot(x, nu * N_POINTS / L_INTERVALLE, label="nu")
+        ax1.grid(True)
+        ax1.set_xlabel("x")
+        ax1.set_ylabel("density")
+        ax1.set_title("Illustration de la valeur de nu en fonction de celle de mu")
+        ax1.legend()
+        plt.show()
+
+
+    elif mode == "holidays":
+        x = np.linspace(0, 1, N_POINTS)
+        # mu = gaussian(MU_1, SIGMA_1, x) + gaussian(MU_2, SIGMA_2, x)
+        # mu = (mu / np.linalg.norm(mu, ord=1))
+
+        mu = np.ones(x.shape) / x.shape
+
+        y =  np.linspace(0, L_INTERVALLE, N_POINTS) # TODO: tester avec x et y de taille différente
+        attract_y = gaussian(L_INTERVALLE / 2, L_INTERVALLE / 6, y)#gaussian(MU_1, SIGMA_1, y) + gaussian(MU_2, SIGMA_2, y)
+        #attract_y = (attract_y / np.linalg.norm(attract_y, ord=1))
+
+
+        phi = (10 ** -4) * (y.T - y) ** 2
+        potential = ((y-9) ** 4).reshape(1, -1)
+
+        foo = x.reshape(-1, 1) - attract_y.reshape(1, -1)
+        costs = np.where(foo > 0, foo, foo ** 4)
+
+        def E(nu, phi):
+            return np.sum(nu ** 3 + 0.5 * nu.T @ phi @ nu)
+      
+        #+ np.tile(potential, (x.size, 1))
+
+        def h_G2(nu): # fonction issue du potentiel
+            return 3 * (nu ** 2)
+        
+        def hprim_G2(nu):
+            return 6 * nu#56 * (nu ** 6)
+
+        method = SemiImplicitMethod(mu, costs, phi, EPS, h_G2, hprim_G2, E)
+        gamma, nu = method.fit()
+
+        fig = plt.figure(f"Solution finale", figsize=(15, 10))
+        ax1 = fig.add_subplot(111)
+        #ax1.plot(x, mu * N_POINTS / L_INTERVALLE, label="mu")
+        ax1.plot(y, attract_y, label="attractiveness")
+        ax1.plot(y, nu * N_POINTS / L_INTERVALLE, label="nu")
+        ax1.grid(True)
+        ax1.set_xlabel("x")
+        ax1.set_ylabel("density")
+        ax1.set_title("Illustration de la valeur de nu en fonction de celle de mu")
+        ax1.legend()
+        plt.show()
 
     # plt.imshow(costs)
     # plt.colorbar()
